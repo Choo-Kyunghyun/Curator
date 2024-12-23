@@ -1,11 +1,9 @@
 import json
+import csv
 import os
 import yt_dlp
 import concurrent.futures
 from datetime import datetime, timezone
-
-# import csv
-# from ytmusicapi import YTMusic
 
 
 class YouTubeFetcher:
@@ -30,7 +28,7 @@ class YouTubeFetcher:
                 continue
             name = fields[0]
             value = fields[1]
-            domain = fields[2]
+            domain = fields[2] if fields[2].startswith(".") else f".{fields[2]}"
             path = fields[3]
             expires = (
                 "0"
@@ -72,7 +70,6 @@ class YouTubeFetcher:
     def fetch_metadata(self, url):
         url = url.split("&si=")[0] if "&si=" in url else url
         ydl_opts = {
-            # "quiet": True,
             "simulate": True,
             "skip_download": True,
             "cookiefile": None if self.block_cookie else self.cookie_path,
@@ -102,20 +99,31 @@ class YouTubeFetcher:
 
 class Collection:
     def __init__(self):
-        self.collection = {}
+        self.collection = []
 
-    def add(self, id, entry, overwrite=False):
-        if id in self.collection and not overwrite:
-            return False
-        self.collection[id] = entry
+    def add(self, entry, overwrite=False):
+        entry_id = entry["id"]
+        for existing_entry in self.collection:
+            if existing_entry["id"] == entry_id:
+                if overwrite:
+                    existing_entry.update(entry)
+                    return True
+                return False
+        self.collection.append(entry)
         return True
+
+    def get(self, id):
+        for entry in self.collection:
+            if entry["id"] == id:
+                return entry
+        return None
 
     def remove(self, id):
-        try:
-            self.collection.pop(id)
-        except KeyError:
-            return False
-        return True
+        entry = self.get(id)
+        if entry:
+            self.collection.remove(entry)
+            return True
+        return False
 
     def stringify(self):
         return json.dumps(self.collection, indent=4)
@@ -126,15 +134,11 @@ class Collection:
     def clear(self):
         self.collection.clear()
 
-    def get(self, id):
-        return self.collection.get(id)
-
 
 class Curator:
     def __init__(self):
         self.collection = Collection()
         self.youtube = YouTubeFetcher()
-        self.youtube.block_cookie = True
         self.collection_path = "data/collection.json"
         self.urls_path = "data/urls.txt"
 
@@ -153,17 +157,27 @@ class Curator:
     def fetch_urls(self):
         data = []
         failed = []
+        youtube_urls = []
+
         if not os.path.exists(self.urls_path):
+            open(self.urls_path, "w").close()
             return False
+        
         with open(self.urls_path, "r", encoding="utf-8") as f:
             urls = f.readlines()
-        urls = [url.strip() for url in urls if url.strip()]
+        urls = [url.strip() for url in urls]
+
+        for url in urls:
+            if "youtube.com" in url:
+                youtube_urls.append(url)
+            else:
+                failed.append(url)
 
         if self.youtube.block_cookie:
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future_to_url = {
                     executor.submit(self.youtube.fetch_metadata, url): url
-                    for url in urls
+                    for url in youtube_urls
                 }
                 for future in concurrent.futures.as_completed(future_to_url):
                     url = future_to_url[future]
@@ -176,25 +190,22 @@ class Curator:
                     except Exception:
                         failed.append(url)
         else:
-            for url in urls:
-                if "youtube.com" in url:
-                    metadata = self.youtube.fetch_metadata(url)
-                    if not metadata:
-                        failed.append(url)
-                    else:
-                        data.extend(metadata)
-                else:
+            for url in youtube_urls:
+                metadata = self.youtube.fetch_metadata(url)
+                if not metadata:
                     failed.append(url)
+                else:
+                    data.extend(metadata)
 
         for entry in data:
-            self.collection.add(entry["id"], entry)
+            self.collection.add(entry)
         with open(self.urls_path, "w", encoding="utf-8") as f:
             f.write("\n".join(failed))
         return True
 
     def extract_urls(self):
         urls = []
-        for id, entry in self.collection.collection.items():
+        for entry in self.collection.collection:
             urls.append(entry["url"])
-        with open(self.urls_path, "w", encoding="utf-8") as f:
+        with open(self.urls_path, "a", encoding="utf-8") as f:
             f.write("\n".join(urls))
